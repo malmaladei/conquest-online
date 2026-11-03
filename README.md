@@ -18,9 +18,16 @@ Other scripts:
 | Command           | What it does                                                         |
 | ----------------- | -------------------------------------------------------------------- |
 | `npm run build`   | Type-check + production build to `dist/`                             |
+| `npm run build:single` | Self-contained single-file build to `dist-single/index.html`   |
 | `npm run preview` | Serve the production build on http://localhost:4318                  |
 | `npm run check`   | Validate 42 territories / 83 borders against the generated geometry  |
 | `npm run geo`     | Regenerate `src/map/generated/map.json` (runs before `dev`/`build`)  |
+
+## Deploy
+
+- `npm run build` → `dist/` (relative asset paths, works from any domain root or sub-path).
+- `npm run build:single` → `dist-single/index.html`, one self-contained file (JS, CSS, fonts inlined; also opens via `file://`).
+- Docker (nginx on port 80): `docker build -t conquest . && docker run -p 8080:80 conquest`
 
 Handy URL flags: `?demo=4` (start a demo game with 2–4 players),
 `?focus=ukraine&zoom=2.5` (zoom on a territory), `&select` (also open its info card).
