@@ -16,6 +16,7 @@ import {
 } from '../data/world';
 import type { LonLat } from './geo/coastlines';
 import { PanZoom } from './panzoom';
+import { bakeGlyph, bakeMerged } from './glyphs';
 import { paperTexture } from './paper';
 import { INK, SEA, compassRose, symbolDefs } from './symbols';
 import type { GeneratedMap, Point } from './types';
@@ -119,53 +120,62 @@ function lanePath(points: Point[]): string {
 }
 
 export class WorldMapView {
-  readonly svg: SVGSVGElement;
+  /** Input surface (the stage element); also carries global state classes. */
+  readonly root: HTMLElement;
+  /** Static artwork layer: only repaints on demo toggle / zoom settle. */
+  readonly base: SVGSVGElement;
+  /** Interaction layer: sea lanes + hit areas + hover/selection highlight. */
+  readonly overlay: SVGSVGElement;
+  /** Army badges + territory labels (counter-scaled with zoom). */
+  readonly symbols: SVGSVGElement;
   readonly panZoom: PanZoom;
+  private world: HTMLElement;
   private hits = new Map<TerritoryId, SVGPathElement>();
   private tints = new Map<TerritoryId, SVGGElement>();
   private badges = new Map<TerritoryId, SVGGElement>();
   private lanes: { a: TerritoryId; b: TerritoryId; el: SVGGElement }[] = [];
-  private scaled: SVGGElement[] = [];
   private symbolScale = 0;
   private hovered: TerritoryId | null = null;
   private selected: TerritoryId | null = null;
+  /** Ids currently carrying highlight classes (so refresh only touches those). */
+  private lit = new Set<TerritoryId>();
+  private rasterScale = 0;
+  private data: GeneratedMap;
+  private events: MapEvents;
 
-  constructor(
-    container: HTMLElement,
-    private data: GeneratedMap,
-    private events: MapEvents = {},
-  ) {
-    container.insertAdjacentHTML('beforeend', this.buildSvg());
-    this.svg = container.querySelector('svg.world-map')!;
-    const viewport = this.svg.querySelector<SVGGElement>('#viewport')!;
+  constructor(container: HTMLElement, data: GeneratedMap, events: MapEvents = {}) {
+    this.data = data;
+    this.events = events;
+    this.root = container;
+    container.classList.add('map-stage');
+    container.insertAdjacentHTML('beforeend', this.buildLayers());
+    this.world = container.querySelector<HTMLElement>('.world')!;
+    this.base = container.querySelector('svg.layer-base')!;
+    this.overlay = container.querySelector('svg.layer-overlay')!;
+    this.symbols = container.querySelector('svg.layer-symbols')!;
 
-    for (const el of this.svg.querySelectorAll<SVGPathElement>('.hit')) this.hits.set(el.dataset.id as TerritoryId, el);
-    for (const el of this.svg.querySelectorAll<SVGGElement>('.tint')) this.tints.set(el.dataset.id as TerritoryId, el);
-    for (const el of this.svg.querySelectorAll<SVGGElement>('.badge')) this.badges.set(el.dataset.id as TerritoryId, el);
-    for (const el of this.svg.querySelectorAll<SVGGElement>('.badge, .t-label-g')) this.scaled.push(el);
-    for (const el of this.svg.querySelectorAll<SVGGElement>('.lane'))
+    for (const el of this.overlay.querySelectorAll<SVGPathElement>('.hit')) this.hits.set(el.dataset.id as TerritoryId, el);
+    for (const el of this.base.querySelectorAll<SVGGElement>('.tint')) this.tints.set(el.dataset.id as TerritoryId, el);
+    for (const el of this.symbols.querySelectorAll<SVGGElement>('.badge')) this.badges.set(el.dataset.id as TerritoryId, el);
+    for (const el of this.overlay.querySelectorAll<SVGGElement>('.lane'))
       this.lanes.push({ a: el.dataset.a as TerritoryId, b: el.dataset.b as TerritoryId, el });
 
     // Paper texture is generated after first paint so the map shows up instantly.
     requestAnimationFrame(() => {
-      this.svg.querySelector('#paper')!.setAttribute('href', paperTexture());
+      this.base.querySelector('#paper')!.setAttribute('href', paperTexture());
     });
 
     this.panZoom = new PanZoom({
-      svg: this.svg,
-      target: viewport,
+      surface: container,
+      target: this.world,
       contentWidth: data.width,
       contentHeight: data.height,
       margin: MARGIN,
       maxZoom: 7,
-      onChange: (v) => {
-        // Level of detail: hide small sea labels when zoomed out.
-        this.svg.classList.toggle('zoomed-out', v.k < 0.75);
-        this.svg.classList.toggle('zoomed-in', v.k > 1.6);
-        this.updateSymbolScale(v.k);
-      },
+      onSettle: (v) => this.onSettle(v.k),
     });
     this.panZoom.fit(false);
+    this.onSettle(this.panZoom.current.k);
     this.bindEvents();
     this.setOwnership(null);
   }
@@ -176,7 +186,7 @@ export class WorldMapView {
 
   /** Apply ownership colours + army counts, or `null` for the neutral board. */
   setOwnership(state: Map<TerritoryId, TerritoryState> | null): void {
-    this.svg.classList.toggle('demo', !!state);
+    this.root.classList.toggle('demo', !!state);
     for (const t of TERRITORIES) {
       const tint = this.tints.get(t.id)!;
       const badge = this.badges.get(t.id)!;
@@ -206,15 +216,28 @@ export class WorldMapView {
   }
 
   /**
-   * Badges and labels shrink less than the map when zooming out (and grow
-   * less when zooming in) so they stay legible on the full-world overview.
+   * Expensive, zoom-dependent work, done once the view has come to rest:
+   *  - level-of-detail classes,
+   *  - counter-scaling badges/labels so they stay legible when zoomed out,
+   *  - re-rasterising the composited layers at the new zoom so they're crisp.
+   * During a gesture the layers are only scaled by the GPU compositor.
    */
-  private updateSymbolScale(k: number): void {
+  private onSettle(k: number): void {
+    this.base.classList.toggle('zoomed-out', k < 0.75);
+
     const s = Math.min(1.45, Math.max(0.85, Math.pow(k, -0.6)));
-    if (Math.abs(s - this.symbolScale) < 0.01) return;
-    this.symbolScale = s;
-    for (const el of this.scaled) {
-      el.setAttribute('transform', `translate(${el.dataset.x},${el.dataset.y}) scale(${s.toFixed(3)})`);
+    if (Math.abs(s - this.symbolScale) >= 0.01) {
+      this.symbolScale = s;
+      this.symbols.style.setProperty('--sym-scale', s.toFixed(3));
+    }
+
+    // Composited layers keep the raster resolution they were created with.
+    // Re-promote them when the zoom changed enough to look soft (or wasteful).
+    const ratio = this.rasterScale ? k / this.rasterScale : Infinity;
+    if (ratio > 1.15 || ratio < 0.6) {
+      this.rasterScale = k;
+      this.world.classList.add('reraster');
+      requestAnimationFrame(() => requestAnimationFrame(() => this.world.classList.remove('reraster')));
     }
   }
 
@@ -225,7 +248,7 @@ export class WorldMapView {
   private bindEvents(): void {
     const idOf = (e: Event) => (e.target as Element).closest<SVGPathElement>('.hit')?.dataset.id as TerritoryId | undefined;
 
-    this.svg.addEventListener('pointerover', (e) => {
+    this.root.addEventListener('pointerover', (e) => {
       if (this.panZoom.isGesturing || (e as PointerEvent).pointerType === 'touch') return;
       const id = idOf(e) ?? null;
       if (id !== this.hovered) {
@@ -234,12 +257,12 @@ export class WorldMapView {
         this.events.onHover?.(id);
       }
     });
-    this.svg.addEventListener('pointerleave', () => {
+    this.root.addEventListener('pointerleave', () => {
       this.hovered = null;
       this.refreshHighlight();
       this.events.onHover?.(null);
     });
-    this.svg.addEventListener('click', (e) => {
+    this.root.addEventListener('click', (e) => {
       const id = idOf(e) ?? null;
       this.select(id === this.selected ? null : id);
     });
@@ -249,16 +272,22 @@ export class WorldMapView {
     // Hover wins over selection for the transient highlight, selection stays outlined.
     const focus = this.hovered ?? this.selected;
     const neighbours = new Set(focus ? NEIGHBOURS.get(focus) : []);
-    this.svg.classList.toggle('has-focus', !!focus);
-    for (const [id, el] of this.hits) {
-      el.classList.toggle('focus', id === focus);
-      el.classList.toggle('neighbour', neighbours.has(id));
-      el.classList.toggle('selected', id === this.selected);
+    this.overlay.classList.toggle('has-focus', !!focus);
+
+    // Only touch elements whose state can change: previously lit + newly lit.
+    const next = new Set<TerritoryId>([...neighbours]);
+    if (focus) next.add(focus);
+    if (this.selected) next.add(this.selected);
+    for (const id of new Set([...this.lit, ...next])) {
+      const hit = this.hits.get(id)!;
+      const badge = this.badges.get(id)!;
+      hit.classList.toggle('focus', id === focus);
+      hit.classList.toggle('neighbour', neighbours.has(id));
+      hit.classList.toggle('selected', id === this.selected);
+      badge.classList.toggle('focus', id === focus);
+      badge.classList.toggle('neighbour', neighbours.has(id));
     }
-    for (const [id, el] of this.badges) {
-      el.classList.toggle('focus', id === focus);
-      el.classList.toggle('neighbour', neighbours.has(id));
-    }
+    this.lit = next;
     for (const l of this.lanes) l.el.classList.toggle('active', !!focus && (l.a === focus || l.b === focus));
   }
 
@@ -266,7 +295,7 @@ export class WorldMapView {
   // Static artwork
   // ---------------------------------------------------------------------
 
-  private buildSvg(): string {
+  private buildLayers(): string {
     const { width: W, height: H, territories, decor } = this.data;
 
     const clipPaths = territories.map((t) => `<clipPath id="clip-${t.id}"><path d="${t.path}"/></clipPath>`).join('');
@@ -293,21 +322,19 @@ export class WorldMapView {
       .join('');
 
     // Decorations sorted by y so lower glyphs overlap higher ones naturally.
+    // Baked into plain paths (no per-instance transform/opacity), see glyphs.ts.
     const glyphs: [number, string][] = [];
-    const stamp = (list: [number, number, number, number][], sym: string, variants: number) => {
-      for (const [x, y, s, v] of list) {
-        glyphs.push([y, `<use href="#${sym}-${v % variants}" transform="translate(${x},${y}) scale(${s})"/>`]);
-      }
+    const stamp = (list: [number, number, number, number][], kind: string) => {
+      for (const [x, y, s, v] of list) glyphs.push([y, bakeGlyph(kind, v, x, y, s)]);
     };
-    stamp(decor.dunes, 'dune', 2);
-    stamp(decor.rocks, 'rock', 2);
-    stamp(decor.trees, 'tree', 3);
-    stamp(decor.conifers, 'conifer', 3);
-    stamp(decor.mountains, 'mountain', 3);
+    stamp(decor.dunes, 'dune');
+    stamp(decor.rocks, 'rock');
+    stamp(decor.trees, 'tree');
+    stamp(decor.conifers, 'conifer');
+    stamp(decor.mountains, 'mountain');
     glyphs.sort((a, b) => a[0] - b[0]);
-    const waves = decor.waves
-      .map(([x, y, s, v]) => `<use href="#wave-${v}" transform="translate(${x},${y}) scale(${s})"/>`)
-      .join('');
+    // Waves never overlap meaningfully, so all of them merge into two paths.
+    const waves = bakeMerged('wave', decor.waves);
 
     const borders = territories.map((t) => `<path d="${t.path}"/>`).join('');
     const hits = territories
@@ -339,13 +366,13 @@ export class WorldMapView {
     const badges = territories
       .map((t) => {
         const [x, y] = t.anchor;
-        return `<g class="badge" data-id="${t.id}" data-x="${x}" data-y="${y}" transform="translate(${x},${y})">
-          <g class="badge-inner">
+        return `<g class="badge" data-id="${t.id}" transform="translate(${x},${y})">
+          <g class="sym-scale"><g class="badge-inner">
             <use href="#fort"/>
             <circle r="10.2" class="badge-disc"/>
             <circle r="10.2" class="badge-shine"/>
             <text class="badge-num" y="4.6">–</text>
-          </g>
+          </g></g>
         </g>`;
       })
       .join('');
@@ -355,7 +382,7 @@ export class WorldMapView {
         const [x, y] = t.anchor;
         const lines = splitName(TERRITORIES.find((tt) => tt.id === t.id)!.name);
         const tspans = lines.map((l, i) => `<tspan x="0" dy="${i === 0 ? 0 : 11}">${esc(l)}</tspan>`).join('');
-        return `<g class="t-label-g" data-x="${x}" data-y="${y}" transform="translate(${x},${y})"><text class="t-label" y="27">${tspans}</text></g>`;
+        return `<g transform="translate(${x},${y})"><g class="sym-scale"><text class="t-label" y="27">${tspans}</text></g></g>`;
       })
       .join('');
 
@@ -406,59 +433,67 @@ export class WorldMapView {
       }
     }
 
-    return `<svg class="world-map" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="World map with 42 territories">
+    const F = FRAME;
+    const svgAttrs = (cls: string) =>
+      `class="layer ${cls}" xmlns="http://www.w3.org/2000/svg" width="${W + F * 2}" height="${H + F * 2}" viewBox="${-F} ${-F} ${W + F * 2} ${H + F * 2}"`;
+
+    const base = `<svg ${svgAttrs('layer-base')} aria-hidden="true">
       <defs>
         ${symbolDefs()}
         <radialGradient id="sea-grad" cx="50%" cy="45%" r="70%">
           <stop offset="0%" stop-color="#c6cdb3"/>
           <stop offset="100%" stop-color="${SEA}"/>
         </radialGradient>
+        ${clipPaths}${continentClips}
+      </defs>
+      <rect x="${-F}" y="${-F}" width="${W + F * 2}" height="${H + F * 2}" fill="url(#sea-grad)"/>
+      <path class="rhumbs" d="${rhumbs(compassA, 32, 2600)} ${rhumbs(compassB, 16, 1400)}"/>
+      <g class="waves">${waves}</g>
+      <g class="coast">
+        <path d="${this.data.ripplePath}" class="ripple w4"/>
+        <path d="${this.data.ripplePath}" class="ripple-gap w4g"/>
+        <path d="${this.data.ripplePath}" class="ripple w3"/>
+        <path d="${this.data.ripplePath}" class="ripple-gap w3g"/>
+        <path d="${this.data.ripplePath}" class="ripple w2"/>
+        <path d="${this.data.ripplePath}" class="ripple-gap w2g"/>
+        <path d="${this.data.ripplePath}" class="ripple w1"/>
+      </g>
+      <path d="${this.data.landPath}" class="land"/>
+      <g class="tints">${tints}</g>
+      <g class="continent-rims">${continentRims}</g>
+      <g class="decor">${glyphs.map((g) => g[1]).join('')}</g>
+      <g class="borders">${borders}</g>
+      <path d="${this.data.landPath}" class="coastline"/>
+      <g class="sea-labels">${oceanLabels}</g>
+      <g class="continent-labels">${continentLabels}</g>
+      <g transform="translate(${compassA[0]},${compassA[1]})" class="compass">${compassRose(62)}</g>
+      <g transform="translate(${compassB[0]},${compassB[1]}) rotate(-8)" class="compass">${compassRose(36)}</g>
+      ${this.cartouche(cartouche)}
+      <image id="paper" x="${-F}" y="${-F}" width="${W + F * 2}" height="${H + F * 2}" preserveAspectRatio="none"/>
+      <g class="frame">
+        <rect x="${-F}" y="${-F}" width="${W + F * 2}" height="${H + F * 2}" class="frame-outer"/>
+        <rect x="0" y="0" width="${W}" height="${H}" class="frame-inner"/>
+        <g class="frame-ticks">${frameSegments.join('')}</g>
+      </g>
+    </svg>`;
+
+    const overlay = `<svg ${svgAttrs('layer-overlay')} role="img" aria-label="World map with 42 territories">
+      <defs>
         <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
           <feGaussianBlur stdDeviation="3" result="b"/>
           <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
         </filter>
-        ${clipPaths}${continentClips}
       </defs>
-      <g id="viewport">
-        <rect x="${-FRAME}" y="${-FRAME}" width="${W + FRAME * 2}" height="${H + FRAME * 2}" fill="url(#sea-grad)"/>
-        <path class="rhumbs" d="${rhumbs(compassA, 32, 2600)} ${rhumbs(compassB, 16, 1400)}"/>
-        <g class="waves">${waves}</g>
-
-        <g class="coast">
-          <path d="${this.data.landPath}" class="ripple w4"/>
-          <path d="${this.data.landPath}" class="ripple-gap w4g"/>
-          <path d="${this.data.landPath}" class="ripple w3"/>
-          <path d="${this.data.landPath}" class="ripple-gap w3g"/>
-          <path d="${this.data.landPath}" class="ripple w2"/>
-          <path d="${this.data.landPath}" class="ripple-gap w2g"/>
-          <path d="${this.data.landPath}" class="ripple w1"/>
-        </g>
-        <path d="${this.data.landPath}" class="land"/>
-        <g class="tints">${tints}</g>
-        <g class="continent-rims">${continentRims}</g>
-        <g class="decor">${glyphs.map((g) => g[1]).join('')}</g>
-        <g class="borders">${borders}</g>
-        <path d="${this.data.landPath}" class="coastline"/>
-
-        <g class="sea-labels">${oceanLabels}</g>
-        <g class="continent-labels">${continentLabels}</g>
-        <g transform="translate(${compassA[0]},${compassA[1]})" class="compass">${compassRose(62)}</g>
-        <g transform="translate(${compassB[0]},${compassB[1]}) rotate(-8)" class="compass">${compassRose(36)}</g>
-        ${this.cartouche(cartouche)}
-
-        <g class="lanes">${lanes}</g>
-        <g class="hits">${hits}</g>
-        <g class="badges">${badges}</g>
-        <g class="labels">${labels}</g>
-
-        <image id="paper" x="${-FRAME}" y="${-FRAME}" width="${W + FRAME * 2}" height="${H + FRAME * 2}" preserveAspectRatio="none"/>
-        <g class="frame">
-          <rect x="${-FRAME}" y="${-FRAME}" width="${W + FRAME * 2}" height="${H + FRAME * 2}" class="frame-outer"/>
-          <rect x="0" y="0" width="${W}" height="${H}" class="frame-inner"/>
-          <g class="frame-ticks">${frameSegments.join('')}</g>
-        </g>
-      </g>
+      <g class="lanes">${lanes}</g>
+      <g class="hits">${hits}</g>
     </svg>`;
+
+    const symbols = `<svg ${svgAttrs('layer-symbols')} aria-hidden="true">
+      <g class="badges">${badges}</g>
+      <g class="labels">${labels}</g>
+    </svg>`;
+
+    return `<div class="world">${base}${overlay}${symbols}</div>`;
   }
 
   private cartouche([x, y]: Point): string {
@@ -467,7 +502,7 @@ export class WorldMapView {
       <path d="M-120,-30 C-60,-38 60,-38 120,-30 L120,22 C60,14 -60,14 -120,22 Z" fill="#efe0bb" stroke="${INK}" stroke-width="1.4"/>
       <path d="M-120,-30 C-134,-30 -138,-14 -128,-8 C-122,-4 -116,-10 -120,-16" fill="#d9c597" stroke="${INK}" stroke-width="1.2"/>
       <path d="M120,22 C134,22 138,6 128,0 C122,-4 116,2 120,8" fill="#d9c597" stroke="${INK}" stroke-width="1.2"/>
-      <path d="M-108,-22 C-55,-29 55,-29 108,-22 M-108,14 C-55,7 55,7 108,14" fill="none" stroke="${INK}" stroke-width=".6" opacity=".6"/>
+      <path d="M-108,-22 C-55,-29 55,-29 108,-22 M-108,14 C-55,7 55,7 108,14" fill="none" stroke="${INK}" stroke-width=".6" stroke-opacity=".6"/>
       <text class="cartouche-title" text-anchor="middle" y="-2">Conquest</text>
       <text class="cartouche-sub" text-anchor="middle" y="11">A Chart of the Known World</text>
     </g>`;

@@ -19,6 +19,8 @@ export interface GeneratedMap {
   width: number;
   height: number;
   landPath: string;
+  /** Simplified land outline used for the coastal ripple strokes. */
+  ripplePath: string;
   territories: GeneratedTerritory[];
   continents: { id: ContinentId; path: string }[];
   seaLanes: { a: TerritoryId; b: TerritoryId; points: Point[]; wraps?: 'west' | 'east' }[];

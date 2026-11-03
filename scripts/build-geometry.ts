@@ -10,7 +10,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { generateDecor } from '../src/map/decor';
-import { buildGeometry } from '../src/map/geometry';
+import { buildGeometry, multiPolygonToPath, simplifyMultiPolygon } from '../src/map/geometry';
 import type { GeneratedMap } from '../src/map/types';
 
 const t0 = performance.now();
@@ -27,6 +27,9 @@ const out: GeneratedMap = {
   width: geo.width,
   height: geo.height,
   landPath: geo.landPath,
+  // The wide, soft coastal ripple strokes are the most expensive thing to
+  // rasterise; a simplified outline looks the same at their width.
+  ripplePath: multiPolygonToPath(simplifyMultiPolygon(geo.land, 1.6, 30)),
   territories: [...geo.territories.values()].map((t) => ({
     id: t.id,
     continent: t.continent,

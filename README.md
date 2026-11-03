@@ -22,11 +22,12 @@ Other scripts:
 | `npm run preview` | Serve the production build on http://localhost:4318                  |
 | `npm run check`   | Validate 42 territories / 83 borders against the generated geometry  |
 | `npm run geo`     | Regenerate `src/map/generated/map.json` (runs before `dev`/`build`)  |
+| `npm run bench -- <url> [cpuThrottle] [w] [h]` | Headless-Chrome frame-time benchmark (pan / zoom / hover) |
 
 ## Deploy
 
 - `npm run build` → `dist/` (relative asset paths, works from any domain root or sub-path).
-- `npm run build:single` → `dist-single/index.html`, one self-contained file (JS, CSS, fonts inlined; also opens via `file://`).
+- `npm run build:single` → `dist-single/index.html`, one file with JS/CSS inlined (fonts still come from the Google Fonts CDN).
 - Docker (nginx on port 80): `docker build -t conquest . && docker run -p 8080:80 conquest`
 
 Handy URL flags: `?demo=4` (start a demo game with 2–4 players),
@@ -38,8 +39,9 @@ Handy URL flags: `?demo=4` (start a demo game with 2–4 players),
 - `src/map/geo/` — hand-simplified coastlines (lon/lat), islands, Voronoi seeds that carve the territories, label anchors.
 - `src/map/geometry.ts` — projection, hand-inked outline wobble, territory partition, sea lanes.
 - `src/map/decor.ts` — procedural mountains, forests, dunes, waves.
-- `src/map/renderer.ts` — SVG renderer with `setOwnership()`, `select()`, hover/neighbour highlight.
-- `src/map/panzoom.ts` — mouse/touch pan, wheel + pinch zoom.
+- `src/map/glyphs.ts` — decoration glyphs, baked into plain transformed paths (keeps the compositor cheap).
+- `src/map/renderer.ts` — layered SVG renderer (static art / hover overlay / badges+labels) with `setOwnership()`, `select()`, hover/neighbour highlight.
+- `src/map/panzoom.ts` — mouse/touch pan, wheel + pinch zoom; one CSS transform per animation frame.
 - `src/demo.ts`, `src/ui/` — demo-state generator, info card.
 
 To reshape a border, move/add seeds in `src/map/geo/seeds.ts` and run `npm run check`.

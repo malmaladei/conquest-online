@@ -1,11 +1,7 @@
 /**
  * App entry: mounts the map, HUD controls, legend and the info card.
+ * Fonts come from the Google Fonts CDN (see index.html).
  */
-import '@fontsource/im-fell-english/400.css';
-import '@fontsource/im-fell-english/400-italic.css';
-import '@fontsource/im-fell-english-sc/400.css';
-import '@fontsource/cinzel/600.css';
-import '@fontsource/cinzel/800.css';
 import './style.css';
 
 import { CONTINENTS, TERRITORIES, type TerritoryId } from './data/world';

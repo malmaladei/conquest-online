@@ -1,7 +1,17 @@
 /**
- * Minimal pan & zoom controller for an SVG group.
+ * Minimal pan & zoom controller.
  * Supports mouse drag, wheel zoom (around the cursor), touch drag and pinch.
  * Distinguishes clicks from drags so territory selection still works.
+ *
+ * Performance notes:
+ *  - The view is applied as ONE CSS transform on a wrapper element whose
+ *    children are GPU-composited layers, so a pan/zoom frame is a cheap
+ *    compositor update instead of an SVG repaint.
+ *  - Input events only update the in-memory view; the DOM write is batched
+ *    into a single requestAnimationFrame per frame.
+ *  - `onSettle` fires once the view has been still for a moment, so callers
+ *    can do the expensive work (re-raster at the new zoom, level of detail)
+ *    when the user isn't interacting.
  */
 
 export interface View {
@@ -11,15 +21,22 @@ export interface View {
 }
 
 export interface PanZoomOptions {
-  svg: SVGSVGElement;
-  target: SVGGElement;
+  /** Element that receives input and defines the viewport size. */
+  surface: HTMLElement;
+  /** Element that gets the CSS transform. */
+  target: HTMLElement;
   contentWidth: number;
   contentHeight: number;
   /** Extra margin (content units) around the content that may be shown. */
   margin: number;
   maxZoom: number;
+  /** Called (inside rAF) whenever the applied view changes. Keep it cheap. */
   onChange?: (view: View) => void;
+  /** Called once the view has stopped changing for SETTLE_MS. */
+  onSettle?: (view: View) => void;
 }
+
+const SETTLE_MS = 160;
 
 export class PanZoom {
   private view: View = { x: 0, y: 0, k: 1 };
@@ -30,22 +47,36 @@ export class PanZoom {
   /** Total pointer travel of the current gesture; used to suppress clicks after drags. */
   private travel = 0;
   private animFrame = 0;
+  private writeFrame = 0;
+  private settleTimer = 0;
+  /** Cached viewport size (avoids forced layout on every input event). */
+  private size = { width: 0, height: 0, left: 0, top: 0 };
+  private opts: PanZoomOptions;
 
-  constructor(private opts: PanZoomOptions) {
-    const { svg } = opts;
-    svg.addEventListener('wheel', this.onWheel, { passive: false });
-    svg.addEventListener('pointerdown', this.onPointerDown);
-    window.addEventListener('pointermove', this.onPointerMove);
+  constructor(opts: PanZoomOptions) {
+    this.opts = opts;
+    const { surface } = opts;
+    this.measure();
+    surface.addEventListener('wheel', this.onWheel, { passive: false });
+    surface.addEventListener('pointerdown', this.onPointerDown);
+    window.addEventListener('pointermove', this.onPointerMove, { passive: true });
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('pointercancel', this.onPointerUp);
     // Swallow the click that ends a drag so it doesn't select a territory.
-    svg.addEventListener('click', (e) => {
-      if (this.travel > 6) {
-        e.stopPropagation();
-        e.preventDefault();
-      }
-    }, true);
-    window.addEventListener('resize', () => this.fit(false));
+    surface.addEventListener(
+      'click',
+      (e) => {
+        if (this.travel > 6) {
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      },
+      true,
+    );
+    window.addEventListener('resize', () => {
+      this.measure();
+      this.fit(false);
+    });
   }
 
   get current(): View {
@@ -59,7 +90,7 @@ export class PanZoom {
 
   /** Fit the whole content into the viewport. */
   fit(animate = true): void {
-    const { width, height } = this.opts.svg.getBoundingClientRect();
+    const { width, height } = this.size;
     const { contentWidth: cw, contentHeight: ch, margin } = this.opts;
     const k = Math.min(width / (cw + margin * 2), height / (ch + margin * 2));
     this.minK = k * 0.9;
@@ -68,9 +99,8 @@ export class PanZoom {
 
   /** Zoom by a factor around a screen point (defaults to viewport centre). */
   zoomBy(factor: number, sx?: number, sy?: number, animate = true): void {
-    const rect = this.opts.svg.getBoundingClientRect();
-    const cx = sx ?? rect.width / 2;
-    const cy = sy ?? rect.height / 2;
+    const cx = sx ?? this.size.width / 2;
+    const cy = sy ?? this.size.height / 2;
     const k = this.clampK(this.view.k * factor);
     const f = k / this.view.k;
     this.setView({ k, x: cx - (cx - this.view.x) * f, y: cy - (cy - this.view.y) * f }, animate);
@@ -78,9 +108,13 @@ export class PanZoom {
 
   /** Centre the view on a content point at a given zoom. */
   focusOn(px: number, py: number, k: number, animate = true): void {
-    const rect = this.opts.svg.getBoundingClientRect();
     const kk = this.clampK(k);
-    this.setView({ k: kk, x: rect.width / 2 - px * kk, y: rect.height / 2 - py * kk }, animate);
+    this.setView({ k: kk, x: this.size.width / 2 - px * kk, y: this.size.height / 2 - py * kk }, animate);
+  }
+
+  private measure(): void {
+    const r = this.opts.surface.getBoundingClientRect();
+    this.size = { width: r.width, height: r.height, left: r.left, top: r.top };
   }
 
   private clampK(k: number): number {
@@ -89,7 +123,6 @@ export class PanZoom {
 
   /** Keep at least part of the map on screen. */
   private clampXY(v: View): View {
-    const rect = this.opts.svg.getBoundingClientRect();
     const { contentWidth: cw, contentHeight: ch, margin } = this.opts;
     const m = margin * v.k;
     const clampAxis = (pos: number, content: number, viewport: number) => {
@@ -98,7 +131,7 @@ export class PanZoom {
       if (size + 2 * m <= viewport) return (viewport - size) / 2;
       return Math.max(viewport - size - m, Math.min(m, pos));
     };
-    return { k: v.k, x: clampAxis(v.x, cw, rect.width), y: clampAxis(v.y, ch, rect.height) };
+    return { k: v.k, x: clampAxis(v.x, cw, this.size.width), y: clampAxis(v.y, ch, this.size.height) };
   }
 
   private setView(v: View, animate: boolean): void {
@@ -124,15 +157,26 @@ export class PanZoom {
     this.animFrame = requestAnimationFrame(step);
   }
 
+  /** Update the view in memory and schedule a single DOM write for this frame. */
   private apply(v: View): void {
     this.view = v;
-    this.opts.target.setAttribute('transform', `translate(${v.x.toFixed(2)},${v.y.toFixed(2)}) scale(${v.k.toFixed(4)})`);
-    this.opts.onChange?.(v);
+    if (!this.writeFrame) this.writeFrame = requestAnimationFrame(this.write);
+    clearTimeout(this.settleTimer);
+    this.settleTimer = window.setTimeout(() => {
+      if (this.pointers.size === 0) this.opts.onSettle?.(this.current);
+      // While a finger/mouse is still down, settle once it is released (see onPointerUp).
+    }, SETTLE_MS);
   }
 
+  private write = () => {
+    this.writeFrame = 0;
+    const v = this.view;
+    this.opts.target.style.transform = `translate3d(${v.x.toFixed(2)}px,${v.y.toFixed(2)}px,0) scale(${v.k.toFixed(4)})`;
+    this.opts.onChange?.(v);
+  };
+
   private localPoint(e: { clientX: number; clientY: number }) {
-    const rect = this.opts.svg.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    return { x: e.clientX - this.size.left, y: e.clientY - this.size.top };
   }
 
   private onWheel = (e: WheelEvent) => {
@@ -190,7 +234,7 @@ export class PanZoom {
       const dy = p.y - this.dragStart.y;
       this.travel = Math.max(this.travel, Math.hypot(dx, dy));
       if (this.travel > 6) {
-        this.opts.svg.classList.add('is-dragging');
+        if (!this.opts.surface.classList.contains('is-dragging')) this.opts.surface.classList.add('is-dragging');
         this.apply(this.clampXY({ k: this.view.k, x: this.dragStart.vx + dx, y: this.dragStart.vy + dy }));
       }
     }
@@ -207,7 +251,11 @@ export class PanZoom {
     }
     if (this.pointers.size === 0) {
       this.dragStart = null;
-      this.opts.svg.classList.remove('is-dragging');
+      this.opts.surface.classList.remove('is-dragging');
+      if (this.travel > 6) {
+        clearTimeout(this.settleTimer);
+        this.settleTimer = window.setTimeout(() => this.opts.onSettle?.(this.current), SETTLE_MS);
+      }
       // Reset travel after the click event of this gesture has fired.
       setTimeout(() => (this.travel = 0), 0);
     }

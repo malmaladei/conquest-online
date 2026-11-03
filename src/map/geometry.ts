@@ -129,6 +129,45 @@ export function multiPolygonToPath(mp: MultiPolygon): string {
   return d;
 }
 
+/** Douglas–Peucker simplification of a closed ring (tolerance in map units). */
+export function simplifyRing(ring: Ring, tolerance: number): Ring {
+  if (ring.length < 8) return ring;
+  const keep = new Uint8Array(ring.length);
+  keep[0] = keep[ring.length - 1] = 1;
+  const stack: [number, number][] = [[0, ring.length - 1]];
+  const t2 = tolerance * tolerance;
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    const [ax, ay] = ring[a];
+    const [bx, by] = ring[b];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy || 1e-9;
+    let maxD = -1;
+    let idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = ring[i];
+      const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+      const d = (px - ax - t * dx) ** 2 + (py - ay - t * dy) ** 2;
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (maxD > t2 && idx > 0) {
+      keep[idx] = 1;
+      stack.push([a, idx], [idx, b]);
+    }
+  }
+  return ring.filter((_, i) => keep[i]);
+}
+
+export function simplifyMultiPolygon(mp: MultiPolygon, tolerance: number, minArea = 0): MultiPolygon {
+  return mp
+    .map((poly) => poly.map((ring) => simplifyRing(ring, tolerance)).filter((r) => r.length >= 4 && ringArea(r) >= minArea))
+    .filter((poly) => poly.length > 0);
+}
+
 export interface BBox {
   minX: number;
   minY: number;

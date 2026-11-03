@@ -40,48 +40,56 @@ html, body {
 
 /* ---------------------------------------------------------------- map ---- */
 
-svg.world-map {
-  width: 100%;
-  height: 100%;
-  display: block;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  cursor: grab;
-}
-svg.world-map.is-dragging { cursor: grabbing; }
+/* The stage receives input; .world carries the single pan/zoom transform. */
+.map-stage { touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; overflow: hidden; }
+.map-stage.is-dragging { cursor: grabbing; }
 
-.rhumbs { stroke: var(--ink); stroke-width: 0.6; opacity: 0.11; fill: none; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+
+/*
+ * Each layer is its own GPU-composited surface: panning/zooming only moves
+ * already-rasterised tiles, and a hover change repaints just the light overlay.
+ * `.reraster` briefly drops the hint after a zoom so the browser rasterises
+ * the layers again at the new scale (crisp instead of stretched).
+ */
+.layer { position: absolute; left: -16px; top: -16px; overflow: visible; will-change: transform; pointer-events: none; }
+.world.reraster,
+.world.reraster .layer { will-change: auto; }
+.layer-overlay .hit { pointer-events: all; }
+
+.sym-scale { transform: scale(var(--sym-scale, 1)); transition: transform 0.25s ease; }
+
+.rhumbs { stroke: var(--ink); stroke-width: 0.6; stroke-opacity: 0.11; fill: none; }
 
 /* Coastal ripple lines: alternating ink strokes and sea-coloured gaps. */
 .coast path { fill: none; stroke-linejoin: round; }
 .ripple { stroke: #5c6a57; }
 .ripple-gap { stroke: #c3cbb0; }
-.w4 { stroke-width: 30; opacity: 0.25; }
+.w4 { stroke-width: 30; stroke-opacity: 0.25; }
 .w4g { stroke-width: 28.4; }
-.w3 { stroke-width: 20; opacity: 0.38; }
+.w3 { stroke-width: 20; stroke-opacity: 0.38; }
 .w3g { stroke-width: 18.4; stroke: #c9d0b5; }
-.w2 { stroke-width: 11; opacity: 0.5; }
+.w2 { stroke-width: 11; stroke-opacity: 0.5; }
 .w2g { stroke-width: 9.6; stroke: #d0d5ba; }
-.w1 { stroke-width: 4; stroke: #a9b597; opacity: 0.9; }
+.w1 { stroke-width: 4; stroke: #a9b597; stroke-opacity: 0.9; }
 
 .land { fill: #ecd7a4; }
-.coastline { fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linejoin: round; opacity: 0.9; }
+.coastline { fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linejoin: round; stroke-opacity: 0.9; }
 
 /* Territory tint: currentColor is the continent (neutral) or player colour. */
 .tint { transition: color 0.5s ease; }
 .tint path { fill: none; stroke: currentColor; stroke-linejoin: round; }
 .tint .tint-fill { fill: currentColor; fill-opacity: 0.13; stroke: none; transition: fill-opacity 0.4s; }
-.tint .r1 { stroke-width: 22; opacity: 0.08; }
-.tint .r2 { stroke-width: 11; opacity: 0.14; }
-.tint .r3 { stroke-width: 4; opacity: 0.3; }
+.tint .r1 { stroke-width: 22; stroke-opacity: 0.08; }
+.tint .r2 { stroke-width: 11; stroke-opacity: 0.14; }
+.tint .r3 { stroke-width: 4; stroke-opacity: 0.3; }
 .demo .tint .tint-fill { fill-opacity: 0.4; }
-.demo .tint .r1 { opacity: 0.22; }
-.demo .tint .r2 { opacity: 0.32; }
-.demo .tint .r3 { opacity: 0.7; }
+.demo .tint .r1 { stroke-opacity: 0.22; }
+.demo .tint .r2 { stroke-opacity: 0.32; }
+.demo .tint .r3 { stroke-opacity: 0.7; }
 
-.continent-rim { fill: none; stroke: currentColor; stroke-width: 7; opacity: 0.32; stroke-linejoin: round; }
-.demo .continent-rim { opacity: 0.12; }
+.continent-rim { fill: none; stroke: currentColor; stroke-width: 7; stroke-opacity: 0.32; stroke-linejoin: round; }
+.demo .continent-rim { stroke-opacity: 0.12; }
 
 .borders path {
   fill: none;
@@ -94,30 +102,29 @@ svg.world-map.is-dragging { cursor: grabbing; }
 
 /* Sea lanes */
 .lane path { fill: none; }
-.lane-under { stroke: #efe5c8; stroke-width: 4.2; opacity: 0.55; }
-.lane-line { stroke: var(--ink); stroke-width: 1.6; stroke-dasharray: 6 4.5; opacity: 0.75; stroke-linecap: round; }
-.lane-dot, .lane-arrow { fill: var(--ink); opacity: 0.8; }
-.lane-caption { font-family: var(--font-body); font-style: italic; font-size: 10px; fill: var(--ink); opacity: 0.8; }
-.lane.active .lane-line { stroke: #8a2d14; stroke-width: 2.4; opacity: 1; animation: lane-march 0.9s linear infinite; }
-.lane.active .lane-under { stroke: #fff3cf; opacity: 0.9; stroke-width: 6; }
-@keyframes lane-march { to { stroke-dashoffset: -21; } }
+.lane-under { stroke: #efe5c8; stroke-width: 4.2; stroke-opacity: 0.55; }
+.lane-line { stroke: var(--ink); stroke-width: 1.6; stroke-dasharray: 6 4.5; stroke-opacity: 0.75; stroke-linecap: round; }
+.lane-dot, .lane-arrow { fill: var(--ink); fill-opacity: 0.8; }
+.lane-caption { font-family: var(--font-body); font-style: italic; font-size: 10px; fill: var(--ink); fill-opacity: 0.8; }
+.lane.active .lane-line { stroke: #8a2d14; stroke-width: 2.4; stroke-opacity: 1; }
+.lane.active .lane-under { stroke: #fff3cf; stroke-opacity: 0.9; stroke-width: 6; }
 
-/* Hit areas & highlight */
-.hit { fill: transparent; stroke: transparent; cursor: pointer; transition: fill 0.18s; stroke-linejoin: round; }
+/* Hit areas & highlight. No transitions or animations here: any running
+   animation repaints the overlay every frame, which re-runs Layerize. */
+.hit { fill: transparent; stroke: transparent; cursor: pointer; stroke-linejoin: round; }
 .has-focus .hit { fill: rgba(40, 24, 8, 0.16); }
 .has-focus .hit.focus { fill: rgba(255, 244, 214, 0.22); stroke: #fff6dc; stroke-width: 3.2; }
 .has-focus .hit.neighbour { fill: rgba(255, 238, 190, 0.07); stroke: #f0c859; stroke-width: 2.2; stroke-dasharray: 7 4; }
 .hit.selected { stroke: #ffe8a3 !important; stroke-width: 4.2 !important; stroke-dasharray: none !important; filter: url(#glow); }
-.is-dragging .hit { transition: none; }
+.lane { pointer-events: none; }
 
 /* Army badges on stone forts */
-.badges, .labels, .decor, .sea-labels, .continent-labels, .compass, .cartouche, #paper, .frame { pointer-events: none; }
 .badge-inner { transition: transform 0.18s ease; transform-box: fill-box; transform-origin: center; }
 .badge.focus .badge-inner { transform: scale(1.22); }
 .badge.neighbour .badge-inner { transform: scale(1.08); }
 .badge-disc { fill: #f4ead0; stroke: var(--ink); stroke-width: 1.5; }
 .badge.owned .badge-disc { fill: currentColor; }
-.badge-shine { fill: none; stroke: #fff; stroke-width: 1.2; opacity: 0.35; stroke-dasharray: 14 60; stroke-dashoffset: -34; }
+.badge-shine { fill: none; stroke: #fff; stroke-width: 1.2; stroke-opacity: 0.35; stroke-dasharray: 14 60; stroke-dashoffset: -34; }
 .badge-num {
   font-family: var(--font-display);
   font-weight: 800;
@@ -150,18 +157,18 @@ svg.world-map.is-dragging { cursor: grabbing; }
   stroke: rgba(240, 230, 200, 0.75);
   stroke-width: 3px;
 }
-.c-bonus { font-family: var(--font-body); font-style: italic; font-size: 11px; fill: var(--ink); opacity: 0.7; letter-spacing: 0.08em; }
+.c-bonus { font-family: var(--font-body); font-style: italic; font-size: 11px; fill: var(--ink); fill-opacity: 0.7; letter-spacing: 0.08em; }
 
 .o-label {
   font-family: var(--font-body);
   font-style: italic;
   fill: #3f4d43;
-  opacity: 0.6;
+  fill-opacity: 0.6;
   letter-spacing: 0.35em;
 }
 .o-label.minor { letter-spacing: 0.18em; }
-.zoomed-out .o-label.minor { opacity: 0; }
-.o-label { transition: opacity 0.3s; }
+.zoomed-out .o-label.minor { fill-opacity: 0; }
+.o-label { transition: fill-opacity 0.3s; }
 
 .compass-n { font-family: var(--font-display); font-weight: 800; fill: #6a2f22; }
 .cartouche-title { font-family: var(--font-display); font-weight: 800; font-size: 24px; letter-spacing: 0.22em; fill: #6a2f22; }
@@ -171,7 +178,7 @@ svg.world-map.is-dragging { cursor: grabbing; }
 
 .frame-outer { fill: none; stroke: var(--ink); stroke-width: 2.2; }
 .frame-inner { fill: none; stroke: var(--ink); stroke-width: 1.4; }
-.frame-ticks rect { fill: var(--ink); opacity: 0.85; }
+.frame-ticks rect { fill: var(--ink); fill-opacity: 0.85; }
 
 /* ---------------------------------------------------------------- HUD ---- */
 
