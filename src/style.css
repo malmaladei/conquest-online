@@ -1,0 +1,302 @@
+/* ==========================================================================
+   Conquest — world map preview
+   Palette: warm parchment, sepia ink, muted sage sea.
+   ========================================================================== */
+
+:root {
+  --ink: #3b2a1a;
+  --ink-soft: #6b5338;
+  --parchment: #f1e4c3;
+  --parchment-deep: #e3cf9f;
+  --gold: #c9a24a;
+  --font-body: 'IM Fell English', Georgia, serif;
+  --font-sc: 'IM Fell English SC', Georgia, serif;
+  --font-display: 'Cinzel', Georgia, serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #2a2016;
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+#app { position: fixed; inset: 0; }
+
+.stage { position: absolute; inset: 0; background: radial-gradient(ellipse at center, #3a2d1f 0%, #1f170f 100%); }
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(30, 18, 6, 0.38) 100%);
+}
+
+/* ---------------------------------------------------------------- map ---- */
+
+/* The stage receives input; .world carries the single pan/zoom transform. */
+.map-stage { touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; overflow: hidden; }
+.map-stage.is-dragging { cursor: grabbing; }
+
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+
+/*
+ * Each layer is its own GPU-composited surface: panning/zooming only moves
+ * already-rasterised tiles, and a hover change repaints just the light overlay.
+ * `.reraster` briefly drops the hint after a zoom so the browser rasterises
+ * the layers again at the new scale (crisp instead of stretched).
+ */
+.layer { position: absolute; left: -16px; top: -16px; overflow: visible; will-change: transform; pointer-events: none; }
+.world.reraster,
+.world.reraster .layer { will-change: auto; }
+.layer-overlay .hit { pointer-events: all; }
+
+.sym-scale { transform: scale(var(--sym-scale, 1)); transition: transform 0.25s ease; }
+
+.rhumbs { stroke: var(--ink); stroke-width: 0.6; stroke-opacity: 0.11; fill: none; }
+
+/* Coastal ripple lines: alternating ink strokes and sea-coloured gaps. */
+.coast path { fill: none; stroke-linejoin: round; }
+.ripple { stroke: #5c6a57; }
+.ripple-gap { stroke: #c3cbb0; }
+.w4 { stroke-width: 30; stroke-opacity: 0.25; }
+.w4g { stroke-width: 28.4; }
+.w3 { stroke-width: 20; stroke-opacity: 0.38; }
+.w3g { stroke-width: 18.4; stroke: #c9d0b5; }
+.w2 { stroke-width: 11; stroke-opacity: 0.5; }
+.w2g { stroke-width: 9.6; stroke: #d0d5ba; }
+.w1 { stroke-width: 4; stroke: #a9b597; stroke-opacity: 0.9; }
+
+.land { fill: #ecd7a4; }
+.coastline { fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linejoin: round; stroke-opacity: 0.9; }
+
+/* Territory tint: currentColor is the continent (neutral) or player colour. */
+.tint { transition: color 0.5s ease; }
+.tint path { fill: none; stroke: currentColor; stroke-linejoin: round; }
+.tint .tint-fill { fill: currentColor; fill-opacity: 0.13; stroke: none; transition: fill-opacity 0.4s; }
+.tint .r1 { stroke-width: 22; stroke-opacity: 0.08; }
+.tint .r2 { stroke-width: 11; stroke-opacity: 0.14; }
+.tint .r3 { stroke-width: 4; stroke-opacity: 0.3; }
+.demo .tint .tint-fill { fill-opacity: 0.4; }
+.demo .tint .r1 { stroke-opacity: 0.22; }
+.demo .tint .r2 { stroke-opacity: 0.32; }
+.demo .tint .r3 { stroke-opacity: 0.7; }
+
+.continent-rim { fill: none; stroke: currentColor; stroke-width: 7; stroke-opacity: 0.32; stroke-linejoin: round; }
+.demo .continent-rim { stroke-opacity: 0.12; }
+
+.borders path {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.15;
+  stroke-opacity: 0.62;
+  stroke-dasharray: 5 1.6 1.4 1.6;
+  stroke-linejoin: round;
+}
+
+/* Sea lanes */
+.lane path { fill: none; }
+.lane-under { stroke: #efe5c8; stroke-width: 4.2; stroke-opacity: 0.55; }
+.lane-line { stroke: var(--ink); stroke-width: 1.6; stroke-dasharray: 6 4.5; stroke-opacity: 0.75; stroke-linecap: round; }
+.lane-dot, .lane-arrow { fill: var(--ink); fill-opacity: 0.8; }
+.lane-caption { font-family: var(--font-body); font-style: italic; font-size: 10px; fill: var(--ink); fill-opacity: 0.8; }
+.lane.active .lane-line { stroke: #8a2d14; stroke-width: 2.4; stroke-opacity: 1; }
+.lane.active .lane-under { stroke: #fff3cf; stroke-opacity: 0.9; stroke-width: 6; }
+
+/* Hit areas & highlight. No transitions or animations here: any running
+   animation repaints the overlay every frame, which re-runs Layerize. */
+.hit { fill: transparent; stroke: transparent; cursor: pointer; stroke-linejoin: round; }
+.has-focus .hit { fill: rgba(40, 24, 8, 0.16); }
+.has-focus .hit.focus { fill: rgba(255, 244, 214, 0.22); stroke: #fff6dc; stroke-width: 3.2; }
+.has-focus .hit.neighbour { fill: rgba(255, 238, 190, 0.07); stroke: #f0c859; stroke-width: 2.2; stroke-dasharray: 7 4; }
+.hit.selected { stroke: #ffe8a3 !important; stroke-width: 4.2 !important; stroke-dasharray: none !important; filter: url(#glow); }
+.lane { pointer-events: none; }
+
+/* Army badges on stone forts */
+.badge-inner { transition: transform 0.18s ease; transform-box: fill-box; transform-origin: center; }
+.badge.focus .badge-inner { transform: scale(1.22); }
+.badge.neighbour .badge-inner { transform: scale(1.08); }
+.badge-disc { fill: #f4ead0; stroke: var(--ink); stroke-width: 1.5; }
+.badge.owned .badge-disc { fill: currentColor; }
+.badge-shine { fill: none; stroke: #fff; stroke-width: 1.2; stroke-opacity: 0.35; stroke-dasharray: 14 60; stroke-dashoffset: -34; }
+.badge-num {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 12.5px;
+  text-anchor: middle;
+  fill: var(--ink);
+}
+.badge.owned .badge-num { fill: #fff; paint-order: stroke; stroke: rgba(30, 18, 6, 0.55); stroke-width: 1.6px; }
+
+.t-label {
+  font-family: var(--font-sc);
+  font-size: 11px;
+  text-anchor: middle;
+  fill: var(--ink);
+  paint-order: stroke;
+  stroke: rgba(246, 236, 210, 0.9);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  letter-spacing: 0.02em;
+}
+
+.c-label {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 24px;
+  letter-spacing: 0.3em;
+  fill: currentColor;
+  opacity: 0.85;
+  paint-order: stroke;
+  stroke: rgba(240, 230, 200, 0.75);
+  stroke-width: 3px;
+}
+.c-bonus { font-family: var(--font-body); font-style: italic; font-size: 11px; fill: var(--ink); fill-opacity: 0.7; letter-spacing: 0.08em; }
+
+.o-label {
+  font-family: var(--font-body);
+  font-style: italic;
+  fill: #3f4d43;
+  fill-opacity: 0.6;
+  letter-spacing: 0.35em;
+}
+.o-label.minor { letter-spacing: 0.18em; }
+.zoomed-out .o-label.minor { fill-opacity: 0; }
+.o-label { transition: fill-opacity 0.3s; }
+
+.compass-n { font-family: var(--font-display); font-weight: 800; fill: #6a2f22; }
+.cartouche-title { font-family: var(--font-display); font-weight: 800; font-size: 24px; letter-spacing: 0.22em; fill: #6a2f22; }
+.cartouche-sub { font-family: var(--font-body); font-style: italic; font-size: 10px; fill: var(--ink); letter-spacing: 0.1em; }
+
+#paper { mix-blend-mode: multiply; opacity: 0.75; }
+
+.frame-outer { fill: none; stroke: var(--ink); stroke-width: 2.2; }
+.frame-inner { fill: none; stroke: var(--ink); stroke-width: 1.4; }
+.frame-ticks rect { fill: var(--ink); fill-opacity: 0.85; }
+
+/* ---------------------------------------------------------------- HUD ---- */
+
+.panel {
+  position: absolute;
+  background:
+    radial-gradient(ellipse at 30% 20%, rgba(255, 250, 235, 0.65), transparent 60%),
+    linear-gradient(160deg, #f4e8ca, #e6d3a6);
+  border: 1.5px solid var(--ink);
+  border-radius: 6px;
+  box-shadow:
+    inset 0 0 0 3px rgba(241, 228, 195, 0.9),
+    inset 0 0 0 4px rgba(59, 42, 26, 0.35),
+    0 8px 24px rgba(20, 12, 4, 0.35);
+}
+
+.brand { top: 16px; left: 16px; display: flex; gap: 12px; align-items: center; padding: 10px 18px 10px 12px; }
+.brand-mark { width: 40px; height: 40px; color: #6a2f22; }
+.brand-mark svg { width: 100%; height: 100%; }
+.brand h1 { margin: 0; font-family: var(--font-display); font-weight: 800; font-size: 22px; letter-spacing: 0.2em; line-height: 1; color: #5a2518; }
+.brand p { margin: 4px 0 0; font-style: italic; font-size: 13px; color: var(--ink-soft); }
+
+.controls { top: 16px; right: 16px; display: flex; gap: 14px; align-items: center; padding: 10px 14px; font-size: 15px; }
+
+.switch { display: inline-flex; gap: 9px; align-items: center; cursor: pointer; font-family: var(--font-sc); font-size: 16px; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-track {
+  width: 40px; height: 22px; border-radius: 11px; background: #cdb98d; border: 1.5px solid var(--ink);
+  position: relative; transition: background 0.2s;
+}
+.switch-thumb {
+  position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%;
+  background: #f7eedb; border: 1.5px solid var(--ink); transition: transform 0.2s;
+}
+.switch input:checked + .switch-track { background: #2f6db3; }
+.switch input:checked + .switch-track .switch-thumb { transform: translateX(18px); }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.segmented { display: inline-flex; border: 1.5px solid var(--ink); border-radius: 5px; overflow: hidden; }
+.segmented button, .btn, .zoom button, .chip, .info-close {
+  font: inherit; color: inherit; background: transparent; border: 0; cursor: pointer;
+}
+.segmented button { padding: 4px 10px; font-family: var(--font-display); font-weight: 600; font-size: 13px; }
+.segmented button + button { border-left: 1px solid rgba(59, 42, 26, 0.5); }
+.segmented button.active { background: var(--ink); color: var(--parchment); }
+.segmented button:disabled, .btn:disabled { opacity: 0.4; cursor: default; }
+
+.btn {
+  padding: 5px 12px; border: 1.5px solid var(--ink); border-radius: 5px; font-family: var(--font-sc); font-size: 15px;
+  background: rgba(255, 250, 235, 0.5);
+}
+.btn:not(:disabled):hover { background: #fff6dd; }
+
+.legend { left: 16px; bottom: 16px; padding: 10px 16px 12px; min-width: 190px; }
+.legend h3 { margin: 0 0 6px; font-family: var(--font-display); font-weight: 600; font-size: 12px; letter-spacing: 0.25em; text-transform: uppercase; color: var(--ink-soft); }
+.legend ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.legend li { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.legend li .muted { margin-left: auto; padding-left: 10px; }
+
+.dot { width: 11px; height: 11px; border-radius: 50%; border: 1.2px solid var(--ink); display: inline-block; flex: none; }
+.muted { color: var(--ink-soft); font-style: italic; }
+
+.zoom { right: 16px; bottom: 16px; display: grid; padding: 4px; }
+.zoom button { width: 36px; height: 34px; font-size: 22px; line-height: 1; font-family: var(--font-display); border-radius: 4px; }
+.zoom button:hover { background: rgba(255, 250, 235, 0.8); }
+.zoom button + button { border-top: 1px solid rgba(59, 42, 26, 0.3); }
+
+.hint {
+  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); margin: 0;
+  font-style: italic; font-size: 14px; color: #f1e4c3; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none; opacity: 0.85; white-space: nowrap;
+}
+
+/* --------------------------------------------------------- info card ---- */
+
+.info-card {
+  top: 84px; right: 16px; width: 320px; padding: 16px 18px 14px;
+  opacity: 0; transform: translateY(-8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s;
+}
+.info-card.open { opacity: 1; transform: none; pointer-events: auto; }
+.info-close { position: absolute; top: 6px; right: 10px; font-size: 24px; line-height: 1; color: var(--ink-soft); }
+.info-close:hover { color: var(--ink); }
+.info-continent { display: flex; align-items: center; gap: 7px; font-family: var(--font-sc); font-size: 14px; }
+.info-continent .dot { background: var(--c); }
+.info-continent .muted { font-family: var(--font-body); font-size: 13px; }
+.info-title { margin: 4px 0 8px; font-family: var(--font-display); font-weight: 800; font-size: 24px; letter-spacing: 0.06em; color: #4a2316; }
+.info-owner { display: flex; align-items: center; gap: 8px; font-size: 15px; padding: 6px 0 8px; border-bottom: 1px dashed rgba(59, 42, 26, 0.4); }
+.info-armies {
+  margin-left: auto; min-width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+  color: #fff; font-family: var(--font-display); font-weight: 800; border: 1.5px solid var(--ink);
+}
+.info-section { margin: 10px 0 6px; font-family: var(--font-display); font-weight: 600; font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--ink-soft); }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 6px; font-size: 14px;
+  border: 1px solid rgba(59, 42, 26, 0.55); border-radius: 999px; background: rgba(255, 250, 235, 0.55);
+}
+.chip:hover { background: #fff6dd; border-color: var(--ink); }
+.sea-mark { font-size: 15px; color: #3d6378; margin-left: 2px; }
+.info-foot { margin-top: 10px; font-size: 12px; }
+
+/* ------------------------------------------------------------ mobile ---- */
+
+@media (max-width: 760px) {
+  .brand { top: 10px; left: 10px; padding: 6px 12px 6px 8px; gap: 8px; }
+  .brand-mark { width: 28px; height: 28px; }
+  .brand h1 { font-size: 16px; }
+  .brand p { display: none; }
+  .controls { top: auto; bottom: 10px; left: 10px; right: 64px; padding: 8px 10px; gap: 8px; justify-content: space-between; flex-wrap: wrap; }
+  .switch { font-size: 14px; }
+  .legend { top: 10px; bottom: auto; left: auto; right: 10px; min-width: 0; padding: 6px 10px; }
+  .legend h3 { display: none; }
+  .legend li { font-size: 12px; }
+  .legend li .muted { display: none; }
+  .zoom { right: 10px; bottom: 10px; }
+  .hint { display: none; }
+  .info-card {
+    top: auto; right: 10px; left: 10px; bottom: 112px; width: auto; max-height: 50vh; overflow: auto;
+    transform: translateY(12px);
+  }
+}
